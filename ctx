@@ -1,0 +1,865 @@
+#!/usr/bin/python3
+#
+# Bret Rusnak
+# Nov 2025
+#
+# Context Management CLI
+# Description: A lightweight command-line context manager for 
+#              tracking project metadata, tasks, notes, and status 
+#              on a per-directory basis. Designed to keep working 
+#              context close to the code, with fast access, minimal 
+#              friction, and optional task archiving.
+#=======================================================================
+#=======================================================================
+
+
+#=======================================================================
+#                           Imports
+#=======================================================================
+import os
+import json
+import argparse
+import sys
+import traceback
+import subprocess
+import tempfile
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+#=======================================================================
+#                Configuration & Paths
+#=======================================================================
+STORAGE_DIR = Path.home() / ".context_data"
+CONFIG_FILE = Path.home() / ".ctxconfig"
+LOG_FILE = Path.home() / "ctx_error.log"
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_CONFIG = {
+    "view_detail_level": "both",       # brief | full | both
+    "view_mode": "compact",            # compact | expanded
+    "default_status": "active",        # active | paused | archived
+    "autosave": True,
+    "auto_archive_done": False,
+    "colors_enabled": True,
+    "use_unicode": True,
+    "confirm_destructive_actions": True,
+    "date_format": "%Y-%m-%d",
+    "editor": None,                    # falls back to $EDITOR
+    "max_tasks": 20
+}
+
+#=======================================================================
+#                         FUNCTIONS
+#=======================================================================
+def load_config():
+    if not CONFIG_FILE.exists():
+        return DEFAULT_CONFIG.copy()
+
+    try:
+        with open(CONFIG_FILE) as f:
+            user_cfg = json.load(f)
+    except Exception:
+        return DEFAULT_CONFIG.copy()
+
+    # Merge defaults (new keys auto-added)
+    merged = DEFAULT_CONFIG.copy()
+    merged.update(user_cfg)
+    return merged
+
+def save_config(cfg):
+    tmp = CONFIG_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=4)
+    tmp.replace(CONFIG_FILE)
+
+CONFIG = load_config()
+
+def open_in_editor(initial_text=""):
+    editor = (
+        CONFIG.get("editor")
+        or os.environ.get("EDITOR")
+        or "nano"
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".ctx", delete=False) as tf:
+        tf.write(initial_text.encode())
+        tf.flush()
+        temp_path = tf.name
+
+    try:
+        subprocess.call([editor, temp_path])
+        with open(temp_path, "r") as f:
+            return f.read().strip()
+    finally:
+        os.unlink(temp_path)
+
+#=======================================================================
+#                         UI Definitions
+#=======================================================================
+if CONFIG["use_unicode"]:
+    ICONS = {"folder": "📂 ", "check": "[✔] ", "todo": "[ ] ", "tag": "🏷️  ", "calendar": "📅 "}
+else:
+    ICONS = {"folder": "PATH: ", "check": "[X] ", "todo": "[ ] ", "tag": "TAG:  ", "calendar": "LAST: "}
+
+COLORS = {
+    "active": "\033[92m", "paused": "\033[93m", "archived": "\033[91m",
+    "cyan": "\033[96m", "bold": "\033[1m", "gray": "\033[90m", "reset": "\033[0m"
+} if CONFIG["colors_enabled"] else {k: "" for k in ["active", "paused", "archived", "cyan", "bold", "gray", "reset"]}
+
+
+#=======================================================================
+#                  Define ContextManager Class
+#=======================================================================
+class ContextManager:
+    def __init__(self):
+        self.current_path = os.getcwd()
+        self.storage_path = self._path_to_filename(self.current_path)
+        self.data = self._load_data()
+
+    def _path_to_filename(self, path):
+        abs_p = os.path.abspath(os.path.expanduser(path))
+        return STORAGE_DIR / (abs_p.replace(os.sep, "!") + ".json")
+
+    def _load_data(self):
+        if self.storage_path.exists():
+            try:
+                with open(self.storage_path, "r") as f:
+                    return json.load(f)
+            except: return None
+        return None
+
+    def _find_by_tag(self, tag_name):
+        if not tag_name:
+            return None
+
+        tag_name = tag_name.lower()
+
+        for entry in STORAGE_DIR.glob("*.json"):
+            try:
+                with open(entry, 'r') as f:
+                    d = json.load(f)
+ 
+                    # Primary single-tag support
+                    if d.get("tag") == tag_name:
+                       return d
+ 
+                    # Backward compatibility (if any old multi-tag files exist)
+                    tags = d.get("tags")
+                    if isinstance(tags, list) and tag_name in tags:
+                        return d
+
+            except Exception:
+                continue
+
+        return None
+
+    def check(self):
+        if self.data:
+            status_map = {"active": "+", "paused": "#", "archived": "!"}
+            char = status_map.get(self.data.get('status', 'active'), "+")
+            return f"\001{COLORS['cyan']}\002[{char}]\001{COLORS['reset']}\002"
+        return ""
+
+    def tags(self):
+        if self.data and self.data.get('tag'):
+            tag = self.data['tag']
+            max_len = CONFIG.get("max_tag_length", 10)
+            if len(tag) > max_len:
+                tag = tag[:max_len] + "…"
+            return f" \001{COLORS['gray']}\002<{tag}>\001{COLORS['reset']}\002"
+        return ""
+
+    def edit_text(initial=""):
+        editor = CONFIG["editor"] or os.environ.get("EDITOR", "nano")
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as f:
+            f.write(initial.encode())
+            path = f.name
+        subprocess.call([editor, path])
+        with open(path) as f:
+            text = f.read().strip()
+        os.unlink(path)
+        return text
+
+    def save(self):
+        if self.data:
+            self.data["path_mapping"] = self.current_path
+            self.data["last_updated"] = datetime.now().strftime(CONFIG["date_format"])
+            with open(self.storage_path, "w") as f:
+                json.dump(self.data, f, indent=4)
+
+    def show_help(self):
+        help_text = f"""
+    {COLORS['bold']}{COLORS['cyan']}CTX — CONTEXT MANAGEMENT CLI{COLORS['reset']}
+
+    USAGE:
+      ctx [command] [subcommand] [options]
+
+    CORE COMMANDS:
+      ctx add
+          Initialize a new context in the current directory.
+
+      ctx view [tag]
+          View the current context or a context by tag.
+
+      ctx edit
+          Interactive editor for tasks, notes, status, and deletion.
+
+      ctx global
+          List all contexts (sorted by status, then tag).
+
+      ctx recent
+          Show the 5 most recently updated contexts.
+
+    TASK COMMANDS:
+      ctx task add "task description"
+          Add a new task to the current context.
+
+      ctx task toggle <task #>
+          Toggle a task between done / not done.
+
+      ctx task done <task #>
+          Mark a task complete and archive it.
+
+      ctx task list
+          List open tasks in the current context.
+
+    TAG COMMANDS:
+      ctx tags
+          Print the current context tag (newline-terminated).
+
+      ctx tag set <new-tag>
+          Change the primary tag for the current context.
+          Warns if the tag already exists.
+
+    STATUS COMMANDS:
+      ctx status
+          Show the current context status.
+
+      ctx status set <active|paused|archived>
+          Change the context status.
+
+    NAVIGATION:
+      ctx path <tag>
+          Print the filesystem path for a context tag.
+
+      jump <tag>
+          Jump (cd) to the directory for a context tag.
+          (Requires ctx setup)
+
+    SHELL INTEGRATION:
+      ctx check
+          Print prompt-safe status indicator.
+
+      ctx tags
+          Print prompt-safe tag indicator.
+
+      ctx setup
+          Install shell helpers (prompt + jump).
+
+    CONFIGURATION:
+      ctx config
+          Interactive configuration editor.
+
+      ~/.ctxconfig
+          Stored settings (JSON).
+
+    MISC:
+      ctx history
+          Show completed (archived) tasks.
+
+      ctx list-tags-only
+          Print all tags (used for shell completion).
+
+      ctx help
+          Show this help screen.
+
+    Detail Level: {CONFIG.get('view_detail_level', 'both')}
+    Config File: {CONFIG_FILE}
+    Data Dir: {STORAGE_DIR}
+    """
+
+        # Use pager if available, "less" if not
+        pager = os.environ.get("PAGER") or shutil.which("less") or None
+        if pager:
+            proc = subprocess.Popen([pager], stdin=subprocess.PIPE)
+            try:
+                proc.communicate(help_text.encode())
+            except KeyboardInterrupt:
+                pass
+        else:
+            print(help_text)
+
+    def _print_edit_menu(self, open_tasks, done_tasks):
+        status = self.data.get('status', '').upper()
+
+        print(f"""
+    --- TASKS ---
+    1. Add Task
+    2. Toggle Task
+    3. Archive Completed
+
+    --- PROJECT ---
+    4. Status (Active / Paused / Archived)
+    5. Notes
+    6. Description
+    7. Brief
+
+    --- FILE MANAGEMENT ---
+    8. Delete Context
+
+    q. Save & Exit
+
+    Tasks: {open_tasks} open / {done_tasks} completed
+    Status: {status}
+    """)
+
+    def display(self, target=None, show_history=False):
+        d = self._find_by_tag(target) if target else self.data
+        p = d.get('path_mapping', 'Unknown') if (target and d) else self.current_path
+        if not d:
+            print("No context found for this directory.")
+            print("Run: ctx add")
+            print("Or jump to an existing context: ctx view <tag>")
+            return
+
+        
+        stat_col = COLORS.get(d.get('status', 'active'), COLORS['reset'])
+        print(f"\n{COLORS['bold']}{COLORS['cyan']}{ICONS['folder']}{p}{COLORS['reset']}")
+        print(f"Project: {d.get('project_name')} [{stat_col}{d.get('status', '').upper()}{COLORS['reset']}]")
+        
+        view_mode = CONFIG.get("view_detail_level", "both")
+        if view_mode in ["brief", "both"]:
+            print(f"Brief: {d.get('brief', 'N/A')}")
+        if view_mode in ["full", "both"]:
+            print(f"Description: {d.get('description', 'N/A')}")
+            
+        print(f"{ICONS['calendar']}{d.get('last_updated', 'N/A')}")
+        print("-" * 50)
+        
+        if show_history:
+            for t in d.get('history', []):
+                print(f"  {ICONS['check']}{t.get('completed_at')}: {t.get('task')}")
+        else:
+            todos = d.get('todos', [])
+            max_tasks = CONFIG.get("max_tasks", 20)
+            shown_tasks = todos[:max_tasks]
+            hidden_count = len(todos) - len(shown_tasks)
+
+            if shown_tasks:
+                for i, t in enumerate(shown_tasks, 1):
+                    mark = ICONS['check'] if t.get('done') else ICONS['todo']
+                    print(f"  {i}. {mark}{t.get('task')}")
+                if hidden_count > 0:
+                    print(f"  ...(+{hidden_count} more tasks not shown)")
+            else:
+                print("No open tasks.")
+        
+        print(f"\n{COLORS['bold']}NOTES:{COLORS['reset']}\n{d.get('notes','')}\n")
+
+    def _edit_toggle_task(self):
+        todos = self.data.get("todos", [])
+        if not todos:
+            print("No tasks to toggle.")
+            return
+
+        max_tasks = CONFIG.get("max_tasks", 20)
+        shown_tasks = todos[:max_tasks]
+
+        # Display tasks
+        for i, t in enumerate(shown_tasks, 1):
+            mark = ICONS["check"] if t.get("done") else ICONS["todo"]
+            print(f"  {i}. {mark}{t.get('task')}")
+    
+        hidden = len(todos) - len(shown_tasks)
+        if hidden > 0:
+            print(f"  ...(+{hidden} more tasks not shown)")
+
+        try:
+            idx = int(input("Task #: ")) - 1
+            if idx < 0 or idx >= len(shown_tasks):
+                print(f"Invalid task number (1–{len(shown_tasks)})")
+                return
+
+            task = todos[idx]
+            task["done"] = not task["done"]
+
+            state = "done" if task["done"] else "not done"
+            print(f"Task marked {state}.")
+
+            # Auto Archive tasks if "checked" or toggled
+            if task["done"] and CONFIG.get("auto_archive_done"):
+                task["completed_at"] = datetime.now().strftime(CONFIG["date_format"])
+                self.data.setdefault("history", []).append(task)
+                self.data["todos"].pop(idx)
+                print(f"{COLORS['archived']}Task archived automatically.{COLORS['reset']}")
+
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+    def _edit_delete_context(self):
+        confirm = input(
+            f"{COLORS['archived']}Type 'yes' to permanently delete this context: {COLORS['reset']}"
+        ).lower()
+
+        if confirm != "yes":
+            print("Delete cancelled.")
+            return False
+
+        try:
+            self.storage_path.unlink(missing_ok=True)
+            self.data = None
+            print(f"{COLORS['archived']}Context deleted.{COLORS['reset']}")
+            return True   # ← tell caller to exit edit loop
+        except Exception as e:
+            print(f"Failed to delete context: {e}")
+            return False
+
+    def edit(self):
+        if not self.data:
+            return print("Run 'ctx add' first.")
+
+        try:
+            while True:
+                open_tasks = len([t for t in self.data.get('todos', []) if not t.get('done')])
+                done_tasks = len(self.data.get('history', []))
+                self._print_edit_menu(open_tasks, done_tasks)
+                
+                c = input("Choice: ").lower()
+
+                if c == '1':
+                    self.data['todos'].append({
+                        "task": input("Task: "),
+                        "done": False
+                    })
+
+                elif c == '2': self._edit_toggle_task()
+
+                elif c == '3':
+                    done = [t for t in self.data['todos'] if t['done']]
+                    for t in done:
+                        t['completed_at'] = datetime.now().strftime(CONFIG["date_format"])
+                        self.data.setdefault('history', []).append(t)
+                    self.data['todos'] = [t for t in self.data['todos'] if not t['done']]
+
+                elif c == '4':
+                    self.data['status'] = {
+                        "1": "active",
+                        "2": "paused",
+                        "3": "archived"
+                    }.get(input("1.Active 2.Paused 3.Archived: "), "active")
+
+                elif c == '5':
+                    self.data["notes"] = open_in_editor(self.data.get("notes", ""))
+
+                elif c == '6':
+                    self.data['description'] = open_in_editor(self.data.get("description", ""))
+                elif c == '7':
+                    self.data['brief'] = open_in_editor(self.data.get("brief", ""))
+
+                elif c == '8': self._edit_delete_context()
+
+                elif c == 'q':
+                    self.save()
+                    break
+
+                self.save()
+
+        except KeyboardInterrupt:
+            self.save()
+            print(f"\n{COLORS['cyan']}Interrupt received. Progress saved.{COLORS['reset']}")
+
+
+    def init(self):
+        if self.data:
+            print("Context already exists here.")
+            return
+
+        try:
+            project_name = input("Project Name: ").strip()
+            if not project_name:
+                project_name = os.path.basename(self.current_path)
+
+#=======================================================================
+#             TAG INPUT + DUPLICATE PROTECTION
+#=======================================================================
+            while True:
+                tag = input("Tag: ").strip().lower()
+
+                if not tag:
+                    print("Tag cannot be empty.")
+                    continue
+
+                existing = self._find_by_tag(tag)
+                if existing:
+                    print(f"\nTag '{tag}' already exists:")
+                    print(f"  Project: {existing.get('project_name')}")
+                    print(f"  Path:    {existing.get('path_mapping')}\n")
+
+                    confirm = input("Use this tag anyway? (y/N): ").lower()
+                    if confirm == 'y':
+                        continue
+                break
+
+            self.data = {
+                "project_name": project_name,
+                "tag": tag,
+                "status": CONFIG.get("default_status", "active"),
+                "brief": input("Brief Summary: ").strip(),
+                "description": input("Full Description: ").strip(),
+                "todos": [],
+                "history": [],
+                "notes": "",
+                "created_at": datetime.now().strftime(CONFIG["date_format"]),
+                "last_updated": datetime.now().strftime(CONFIG["date_format"]),
+                "path_mapping": self.current_path
+            } 
+
+            self.save()
+            print(f"Context '{project_name}' initialized.")
+
+        except KeyboardInterrupt:
+            print(f"\n{COLORS['archived']}Initialization cancelled.{COLORS['reset']}")
+
+    def setup(self):
+        shell_rc = Path.home() / ".bashrc"
+
+        jump_logic = r'''
+# --- Context CLI Jump & Completion ---
+jump() {
+    # 1. Get the path from our python script
+    local target_path
+    target_path=$(ctx path "$1")
+
+    # 2. Check if the path is empty
+    if [ -z "$target_path" ]; then
+        echo "Error: Tag '$1' not found in ~/.context_data"
+        return 1
+    fi
+
+    # 3. Check if the directory actually exists on disk
+    if [ -d "$target_path" ]; then
+        cd "$target_path" || return
+    else
+        echo "Error: Tag '$1' points to $target_path, but that folder is gone."
+        return 1
+    fi
+}
+'''
+#  This is an issue for custom prompts.  For a simple user@host prompt,
+#  works just fine and appends the ctx check and ctx tags to the prompt, but 
+#  for more advanced custom prompts with ansii color codes, it breaks and 
+#  you get weird behavior.  
+        prompt_logic = r'''
+# --- Context CLI Prompt Injection (simple) ---
+if [[ -z "$CTX_PROMPT_SETUP" ]]; then
+    CTX_PROMPT_SETUP=1
+
+    # Only modify a standard single-line PS1
+    # Append ctx info before the final $
+    PS1="\u@\h \$(ctx check)\$(ctx tags) \$ "
+fi
+'''
+        content = shell_rc.read_text() if shell_rc.exists() else ""
+        with open(shell_rc, "a") as f:
+            if "jump()" not in content: f.write(jump_logic)
+            if "ctx check" not in content: f.write(prompt_logic)
+
+        print("Setup complete! Run 'source ~/.bashrc' to apply changes.\n")
+        print("If you use a custom PS1 prompt, you can append the ctx status and tag like this:")
+        print(r'  PS1="YOUR_PROMPT $(ctx check)$(ctx tags) $"')
+        print("Replace YOUR_PROMPT with your existing prompt string.")    
+
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("cmd", choices=["add", "view", "recent", "edit", "task", "global", "check", "status", "tag", "tags", "path", "setup", "list-tags-only", "config", "help", "history"], nargs="?", default="view")
+    parser.add_argument("args", nargs="*", help="Args")
+    args = parser.parse_args()
+
+    try:
+        mgr = ContextManager()
+        if args.cmd == "help": mgr.show_help()
+        elif args.cmd == "add": mgr.init()
+        elif args.cmd == "view": mgr.display(target=args.args[0] if args.args else None)
+        elif args.cmd == "status":
+            if not mgr.data:
+                print("No context here. Run: ctx add")
+                return
+
+#=======================================================================
+#                       ctx status
+#=======================================================================
+            if not args.args:
+                print("STATUS  |   TAG  |  PROJECT NAME")
+                print("================================")                
+                print(
+                    f"{mgr.data.get('status','').upper():<10} "
+                    f"{mgr.data.get('tag','-'):<10} "
+                    f"{mgr.data.get('project_name','')}"
+                )
+                return
+
+#=======================================================================
+#                  ctx status set <value>
+#=======================================================================
+            if args.args[0] != "set" or len(args.args) < 2:
+                print("Usage: ctx status set <active|paused|archived>")
+                return
+
+            new_status = args.args[1].lower()
+
+            if new_status not in ("active", "paused", "archived"):
+                print("Invalid status. Choose: active, paused, archived")
+                return
+
+            old_status = mgr.data.get("status", "active")
+
+            if new_status == old_status:
+                print(f"Status already '{new_status}'.")
+                return
+
+            mgr.data["status"] = new_status
+            mgr.save()
+
+            print(f"Status changed: {old_status} → {new_status}")
+        elif args.cmd == "recent":
+            entries = []
+            for e in STORAGE_DIR.glob("*.json"):
+                try:
+                    d = json.load(open(e))
+                    ts = d.get("last_updated", "")
+                    entries.append((ts, d))
+                except:
+                    continue
+  
+            for _, d in sorted(entries, reverse=True)[:5]:
+                print(
+                    f"{d.get('last_updated',''):16} "
+                    f"{d.get('status','').upper():<8} "
+                    f"{d.get('tag','-'):10} "
+                    f"{d.get('project_name','')}"
+                )
+        elif args.cmd == "task":
+            if not mgr.data:
+                print("No context here. Run: ctx add")
+                return
+
+            if not args.args:
+                print("Usage: ctx task [add|toggle|done|list] [...]")
+                return
+
+            action = args.args[0]
+
+            if action == "add":
+                task_text = " ".join(args.args[1:]).strip()
+                if not task_text:
+                    print("Usage: ctx task add \"Task description\"")
+                    return
+        
+                mgr.data.setdefault("todos", []).append({
+                    "task": task_text,
+                    "done": False
+                })
+                mgr.save()
+                print(f"Task added: {task_text}")
+
+            elif action in ("toggle", "done"):
+                if len(args.args) < 2 or not args.args[1].isdigit():
+                    print(f"Usage: ctx task {action} <task #>")
+                    return
+                
+                idx = int(args.args[1]) - 1
+                todos = mgr.data.get("todos", [])
+
+                if idx < 0 or idx >= len(todos):
+                    print("Invalid task number.")
+                    return
+
+                if action == "toggle":
+                    task = todos[idx]
+                    task["done"] = not task["done"]
+
+                    state = "done" if task["done"] else "not done"
+                    print(f"Task {idx + 1} marked {state}.")
+
+                    # Auto-archive if enabled
+                    if task["done"] and CONFIG.get("auto_archive_done"):
+                        task["completed_at"] = datetime.now().strftime(CONFIG["date_format"])
+                        mgr.data.setdefault("history", []).append(task)
+                        mgr.data["todos"].pop(idx)
+                        print(f"{COLORS['archived']}Task archived automatically.{COLORS['reset']}")
+
+                else:  # done
+                    t = todos.pop(idx)
+                    t["done"] = True
+                    t["completed_at"] = datetime.now().strftime(CONFIG["date_format"])
+                    mgr.data.setdefault("history", []).append(t)
+                    print(f"Task {idx + 1} archived.")
+
+                mgr.save()
+            elif action == "list":
+                for i, t in enumerate(mgr.data.get("todos", []), 1):
+                    mark = ICONS['check'] if t.get("done") else ICONS['todo']
+                    print(f"{i}. {mark}{t.get('task')}")
+
+            else:
+                print("Unknown task command.")
+        elif args.cmd == "history": mgr.display(show_history=True)
+        elif args.cmd == "edit": mgr.edit()
+        elif args.cmd == "setup": mgr.setup()
+        elif args.cmd == "check": print(mgr.check(), end="")
+        elif args.cmd == "tag":
+            if not mgr.data:
+                print("No context here. Run: ctx add")
+                return
+
+            if not args.args:
+                print("Usage: ctx tag set <new-tag>")
+                return
+
+            action = args.args[0]
+
+            if action != "set":
+                print("Usage: ctx tag set <new-tag>")
+                return
+
+            new_tag = " ".join(args.args[1:]).strip().lower()
+
+            if not new_tag:
+                print("Tag cannot be empty.")
+                return
+
+            if new_tag == mgr.data.get("tag"):
+                print("Tag is already set to that value.")
+                return
+
+            existing = mgr._find_by_tag(new_tag)
+            if existing:
+                print(f"Tag '{new_tag}' already exists:")
+                print(f"  Project: {existing.get('project_name')}")
+                print(f"  Path:    {existing.get('path_mapping')}")
+                confirm = input("Use this tag anyway? (y/N): ").lower()
+                if confirm != "y":
+                    print("Tag change cancelled.")
+                    return
+
+            old_tag = mgr.data.get("tag")
+            mgr.data["tag"] = new_tag
+            mgr.save()
+
+            print(f"Tag changed: {old_tag} → {new_tag}")
+        elif args.cmd == "tags" : print(mgr.tags())
+        elif args.cmd == "path":
+            t = mgr._find_by_tag(args.args[0]) if args.args else None
+            if t: print(t.get('path_mapping', ''), end="")
+        elif args.cmd == "list-tags-only":
+            tags = [json.load(open(e)).get('tag') for e in STORAGE_DIR.glob("*.json")]
+            print(" ".join(filter(None, tags)), end="")
+        elif args.cmd == "global":
+            print(f"{'STATUS':<10} | {'TAG':<10} | {'PROJECT'}")
+
+            def status_key(s):
+                return {"active": 0, "paused": 1, "archived": 2}.get(s, 9)
+
+            entries = []
+            for e in STORAGE_DIR.glob("*.json"):
+                try:
+                    entries.append(json.load(open(e)))
+                except:
+                    pass
+
+            for d in sorted(entries, key=lambda x: (status_key(x.get('status')), x.get('tag',''))):
+                col = COLORS.get(d.get('status'), "")
+                rst = COLORS['reset']
+                print(
+                    f"{col}[{d.get('status','').upper():8}]{rst} | "
+                    f"{d.get('tag','-'):10} | "
+                    f"{d.get('project_name')}"
+                )
+        elif args.cmd == "config":
+            try:
+                while True:
+                    print("\nConfiguration:")
+                    print("1. View detail level        :", CONFIG["view_detail_level"])
+                    print("2. View mode                :", CONFIG["view_mode"])
+                    print("3. Default status           :", CONFIG["default_status"])
+                    print("4. Autosave                 :", CONFIG["autosave"])
+                    print("5. Auto Archive             :", CONFIG["auto_archive_done"])
+                    print("6. Unicode icons            :", CONFIG["use_unicode"])
+                    print("7. Colors                   :", CONFIG["colors_enabled"])
+                    print("8. Confirm destructive acts :", CONFIG["confirm_destructive_actions"])
+                    print("9. Date format              :", CONFIG["date_format"])
+                    print("10. Editor                  :", CONFIG["editor"] or "$EDITOR")
+                    print("11. Max tasks displayed     :", CONFIG["max_tasks"])
+                    print("q. Exit")
+
+                    c = input("> ").strip().lower()
+
+                    if c == "1":
+                        v = input("brief / full / both: ").strip().lower()
+                        if v in ("brief", "full", "both"):
+                            CONFIG["view_detail_level"] = v
+
+                    elif c == "2":
+                        v = input("compact / expanded: ").strip().lower()
+                        if v in ("compact", "expanded"):
+                            CONFIG["view_mode"] = v
+
+                    elif c == "3":
+                        v = input("active / paused / archived: ").strip().lower()
+                        if v in ("active", "paused", "archived"):
+                            CONFIG["default_status"] = v
+
+                    elif c == "4":
+                        CONFIG["autosave"] = not CONFIG["autosave"]
+                    
+                    elif c == '5':
+                       CONFIG['auto_archive_done'] = not CONFIG.get('auto_archive_done', False)
+                       print(f"Auto-archive toggled tasks set to {CONFIG['auto_archive_done']}")
+                       with open(CONFIG_FILE, 'w') as f:
+                           json.dump(CONFIG, f, indent=4)
+
+                    elif c == "6":
+                        CONFIG["use_unicode"] = not CONFIG["use_unicode"]
+
+                    elif c == "7":
+                        CONFIG["colors_enabled"] = not CONFIG["colors_enabled"]
+
+                    elif c == "8":
+                        CONFIG["confirm_destructive_actions"] = not CONFIG["confirm_destructive_actions"]
+        
+                    elif c == "9":
+                       CONFIG["date_format"] = input("strftime format: ").strip()
+
+                    elif c == "10":
+                        e = input("Editor (blank for $EDITOR): ").strip()
+                        CONFIG["editor"] = e or None
+
+                    elif c == "11":
+                        try:
+                            CONFIG["max_tasks"] = int(input("Max tasks: "))
+                        except ValueError:
+                            pass
+
+                    elif c == "q":
+                        break
+
+                    save_config(CONFIG)
+
+                print("Config updated.")
+
+            except KeyboardInterrupt:
+                print("\nConfig cancelled. No changes made.")
+
+    except Exception as e:
+
+        if not isinstance(e, KeyboardInterrupt):
+            with open(LOG_FILE, "a") as f: f.write(traceback.format_exc())
+            print(f"Error: {e}")
+
+
+#=======================================================================
+#                   Call the main function
+#=======================================================================
+if __name__ == "__main__":
+    main()
