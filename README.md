@@ -24,7 +24,7 @@ It works especially well for developers who jump between many repositories, envi
  - Prompt-safe output (ANSI-aware)
  
 **Philosophy:**
- - CTX is intentionally:
+ CTX is intentionally:
  - Local – Context is tied to directories, not Git repos or cloud services
  - Transparent – All data is readable JSON
  - Low-friction – No mandatory workflows
