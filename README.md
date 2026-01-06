@@ -223,7 +223,7 @@ Example output:
 
 
 Where:
-+ = active
+\+ = active
 
 \# = paused
 
