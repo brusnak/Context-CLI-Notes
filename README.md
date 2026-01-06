@@ -30,6 +30,16 @@ It works especially well for developers who jump between many repositories, envi
  - Transparent – All data is readable JSON
  - Low-friction – No mandatory workflows
  - Shell-native – Designed to live inside your prompt, not replace it
+ 
+**Screenshots:**
+
+![Promt with Context](Screenshots/prompt_with_context.png)
+![ctx view](Screenshots/ctx_view.png)
+![ctx edit](Screenshots/ctx_edit.png)
+![ctx uses default editor](ctx_use_editor.png)
+![ctx history](Screenshots/ctx_history.png)
+![ctx toggling a task](Screenshots/ctx_task_toggle.png)
+![ctx configuration](Screenshots/ctx_config.png)
 
 **Installation:**
 
