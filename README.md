@@ -222,7 +222,7 @@ Example output:
 
 Where:
 + = active
-# = paused
+\# = paused
 ! = archived
 
 
