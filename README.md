@@ -32,6 +32,7 @@ It works especially well for developers who jump between many repositories, envi
  - Shell-native – Designed to live inside your prompt, not replace it
 
 **Installation:**
+
 Place the script somewhere in your $PATH, for example:
 
 ```bash
@@ -51,6 +52,7 @@ ctx setup
 ```
 
 **Data Storage:**
+
 CTX stores all context data under:
 
 ```text
@@ -222,7 +224,9 @@ Example output:
 
 Where:
 + = active
+
 \# = paused
+
 ! = archived
 
 
