@@ -523,52 +523,79 @@ class ContextManager:
 
     def setup(self):
         shell_rc = Path.home() / ".bashrc"
+        content = shell_rc.read_text() if shell_rc.exists() else ""
 
         jump_logic = r'''
-# --- Context CLI Jump & Completion ---
-jump() {
-    # 1. Get the path from our python script
-    local target_path
-    target_path=$(ctx path "$1")
+    # --- Context CLI Jump & Completion ---
+    jump() {
+        # 1. Get the path from our python script
+        local target_path
+        target_path=$(ctx path "$1")
 
-    # 2. Check if the path is empty
-    if [ -z "$target_path" ]; then
-        echo "Error: Tag '$1' not found in ~/.context_data"
-        return 1
-    fi
+        # 2. Check if the path is empty
+        if [ -z "$target_path" ]; then
+            echo "Error: Tag '$1' not found in ~/.context_data"
+            return 1
+        fi
 
-    # 3. Check if the directory actually exists on disk
-    if [ -d "$target_path" ]; then
-        cd "$target_path" || return
-    else
-        echo "Error: Tag '$1' points to $target_path, but that folder is gone."
-        return 1
-    fi
-}
-'''
-#  This is an issue for custom prompts.  For a simple user@host prompt,
-#  works just fine and appends the ctx check and ctx tags to the prompt, but 
-#  for more advanced custom prompts with ansii color codes, it breaks and 
-#  you get weird behavior.  
+        # 3. Check if the directory actually exists on disk
+        if [ -d "$target_path" ]; then
+            cd "$target_path" || return
+        else
+            echo "Error: Tag '$1' points to $target_path, but that folder is gone."
+            return 1
+        fi
+    }
+    '''
+
         prompt_logic = r'''
-# --- Context CLI Prompt Injection (simple) ---
-if [[ -z "$CTX_PROMPT_SETUP" ]]; then
-    CTX_PROMPT_SETUP=1
+    # --- Context CLI Prompt Injection (simple) ---
+    if [[ -z "$CTX_PROMPT_SETUP" ]]; then
+        CTX_PROMPT_SETUP=1
 
-    # Only modify a standard single-line PS1
-    # Append ctx info before the final $
-    PS1="\u@\h \$(ctx check)\$(ctx tags) \$ "
-fi
-'''
-        content = shell_rc.read_text() if shell_rc.exists() else ""
-        with open(shell_rc, "a") as f:
-            if "jump()" not in content: f.write(jump_logic)
-            if "ctx check" not in content: f.write(prompt_logic)
+        # Only modify a standard single-line PS1
+        # Append ctx info before the final $
+        PS1="\u@\h \$(ctx check)\$(ctx tags) \$ "
+    fi
+    '''
 
-        print("Setup complete! Run 'source ~/.bashrc' to apply changes.\n")
-        print("If you use a custom PS1 prompt, you can append the ctx status and tag like this:")
-        print(r'  PS1="YOUR_PROMPT $(ctx check)$(ctx tags) $"')
-        print("Replace YOUR_PROMPT with your existing prompt string.")    
+        print("Context CLI Setup")
+        print("----------------")
+    
+        # Ask about jump function
+        setup_jump = input("Would you like to setup the 'jump' function to quickly navigate between tagged directories? (y/n): ").lower()
+        if setup_jump.startswith('y'):
+            if "jump()" not in content:
+                with open(shell_rc, "a") as f:
+                    f.write(jump_logic)
+                print("✓ Jump function added to ~/.bashrc")
+            else:
+                print("Jump function already exists in ~/.bashrc")
+        else:
+            print("× Jump function setup skipped")
+
+        # Ask about prompt integration
+        setup_prompt = input("Would you like to setup prompt integration to show context status and tags? (y/n): ").lower()
+        if setup_prompt.startswith('y'):
+            if "ctx check" not in content:
+                with open(shell_rc, "a") as f:
+                    f.write(prompt_logic)
+                print("✓ Prompt integration added to ~/.bashrc")
+            else:
+                print("Prompt integration already exists in ~/.bashrc")
+        else:
+            print("× Prompt integration setup skipped")
+    
+        print("\nSetup complete!")
+    
+        if setup_jump.startswith('y') or setup_prompt.startswith('y'):
+            print("Run 'source ~/.bashrc' to apply changes.")
+    
+        if setup_prompt.startswith('y'):
+            print("\nNote: If you use a custom PS1 prompt, you can append the ctx status and tag like this:")
+            print(r'  PS1="YOUR_PROMPT $(ctx check)$(ctx tags) $"')
+            print("Replace YOUR_PROMPT with your existing prompt string.")
+
 
 def main():
     parser = argparse.ArgumentParser(add_help=False)
